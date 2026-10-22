@@ -1,0 +1,10 @@
+# 开发产物，不上传（只保留 index.html + lib/ 两个部署文件）
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bak
+_*.py
+_*.mjs
+_*.md
+.edge_shot/

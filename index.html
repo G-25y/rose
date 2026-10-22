@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>粉色玫瑰</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; }
+  body {
+    background:
+      radial-gradient(ellipse at 72% 18%, rgba(140, 70, 220, 0.28) 0%, transparent 50%),
+      radial-gradient(ellipse at 22% 60%, rgba(50, 110, 210, 0.22) 0%, transparent 55%),
+      radial-gradient(ellipse at 50% 38%, #241b4d 0%, #151036 45%, #0a0820 100%);
+    font-family: system-ui, "Microsoft YaHei", sans-serif;
+  }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+  .hint {
+    position: fixed; bottom: 16px; left: 0; right: 0; text-align: center;
+    color: #e7b8cc; font-size: 13px; letter-spacing: 1px;
+    pointer-events: none; opacity: 0.65;
+  }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div class="hint">拖动旋转 &nbsp;·&nbsp; 滚轮缩放</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./lib/three.module.js",
+    "three/addons/": "./lib/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/OrbitControls.js';
+
+const app = document.getElementById('app');
+
+/* ===================== 渲染器 ===================== */
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+app.appendChild(renderer.domElement);
+
+/* ===================== 场景 & 相机 ===================== */
+const scene = new THREE.Scene();
+const isSingle = new URLSearchParams(location.search).has('single');
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.set(isSingle ? 0 : 0, isSingle ? 0 : 0.1, isSingle ? 7.0 : 7.5);
+
+/* ===================== 粒子着色器 ===================== */
+const roseVertexShader = `
+  attribute vec3 targetPos;
+  attribute float delay;
+  attribute float size;
+  attribute vec3 col;
+  uniform float uProgress;
+  uniform float uTime;
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying float vAngle;   // 粒子环绕方位角（0~1，用于彩虹渐变）
+
+  float easeOutCubic(float t){ return 1.0 - pow(1.0 - t, 3.0); }
+
+  void main(){
+    float p = clamp((uProgress - delay) / (1.0 - delay), 0.0, 1.0);
+    p = easeOutCubic(p);
+    vec3 pos = mix(position, targetPos, p);
+
+    float w = 0.012 * p;
+    pos.x += sin(uTime * 1.2 + delay * 30.0) * w;
+    pos.y += cos(uTime * 1.4 + delay * 25.0) * w;
+    pos.z += sin(uTime * 1.0 + delay * 35.0) * w;
+
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = size * (340.0 / -mvPosition.z);
+
+    vColor = col;
+    vAngle = atan(targetPos.z, targetPos.x) / 6.28318 + 0.5;
+    vAlpha = smoothstep(0.0, 0.15, p);
+  }
+`;
+
+const roseFragmentShader = `
+  uniform vec3 uTopColor;
+  uniform vec3 uBottomColor;
+  uniform vec3 uHeartColor;
+  uniform vec3 uGreenColor;
+  uniform vec3 uGreenDkColor;
+  uniform float uRainbow;   // 0=单色, 1=彩虹
+  varying vec3 vColor;
+  varying float vAlpha;
+  varying float vAngle;
+
+  vec3 hsv2rgb(vec3 c) {
+    vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+  }
+
+  void main(){
+    vec3 color;
+    float type = vColor.r;
+    if (type < 0.5) {
+      vec3 solid = mix(uBottomColor, uTopColor, clamp(vColor.g, 0.0, 1.0));   // 单色：按高度渐变
+      vec3 rainbow = hsv2rgb(vec3(vAngle, 0.85, 1.0));   // 彩虹：随环绕角度变色
+      color = mix(solid, rainbow, uRainbow);
+    } else if (type < 1.5) {
+      color = mix(uHeartColor, uTopColor, vColor.g);   // 花心：心→顶渐变
+    } else if (type < 2.5) {
+      color = uGreenColor;   // 花茎/叶
+    } else {
+      color = uGreenDkColor; // 叶脉/花萼
+    }
+    vec2 c = gl_PointCoord - vec2(0.5);
+    float d = length(c);
+    float a = smoothstep(0.5, 0.08, d);
+    gl_FragColor = vec4(color, a * vAlpha);
+  }
+`;
+
+/* ===================== 背景星光着色器 ===================== */
+const starVertexShader = `
+  attribute float size;
+  attribute float tw;
+  attribute vec3 col;   // 每颗星的颜色（白/蓝/紫）
+  uniform float uTime;
+  varying float vTw;
+  varying vec3 vCol;
+  void main(){
+    vTw = tw;
+    vCol = col;
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = size * (160.0 / -mvPosition.z);
+  }
+`;
+const starFragmentShader = `
+  uniform float uTime;
+  varying float vTw;
+  varying vec3 vCol;
+  void main(){
+    vec2 c = gl_PointCoord - vec2(0.5);
+    float d = length(c);
+    float a = smoothstep(0.5, 0.1, d);
+    a *= 0.5 + 0.5 * sin(uTime * vTw + vTw * 10.0);
+    gl_FragColor = vec4(vCol, a * 0.7);
+  }
+`;
+
+/* ===================== 玫瑰粒子生成（离散花瓣风格） =====================
+ * 结构：
+ *   1. 离散花瓣 —— 4 层、每层若干片，同心环排列（等分 + 相邻层错开）
+ *   2. 花瓣形状 —— 长方形主体 + 椭圆圆角（顶端不尖），轮廓线 + 内部填充
+ *   3. 螺旋花心 + 花萼 + 花茎
+ */
+function generateRoseParticles(roseOffset, withStem = true, numLayers = 99, tiltScale = 1) {
+  const raw = [];   // {x, y, z, color, size}
+
+  // 颜色不在此写死，改为存「类型 + 参数」，由片元着色器用 uniform 动态着色：
+  //   类型 0=花瓣(参数=高度t,渐变) 1=花心(参数=螺旋进度) 2=茎叶 3=叶脉/花萼
+  const add = (x, y, z, type, t, size) => raw.push({ x, y, z, type, t, size });
+  const UP = new THREE.Vector3(0, 1, 0);
+  const topY = 0.85, botY = -0.08;
+
+  /* 1. 离散花瓣：4 层，同心环排列，椭圆角长方形花瓣 */
+  const layers = [
+    { count: 5, length: 0.52, width: 0.17, curvature: 0.28, edgeCurl: 0.18, tilt: 0.12, radius: 0.08, height: 0.30 },
+    { count: 7, length: 0.79, width: 0.29, curvature: 0.34, edgeCurl: 0.21, tilt: 0.32, radius: 0.20, height: 0.22 },
+    { count: 8, length: 1.06, width: 0.42, curvature: 0.40, edgeCurl: 0.24, tilt: 0.54, radius: 0.36, height: 0.12 },
+    { count: 9, length: 1.32, width: 0.54, curvature: 0.44, edgeCurl: 0.26, tilt: 0.72, radius: 0.52, height: 0.02 },
+  ];
+
+  const totalLayers = Math.min(numLayers, layers.length);
+  for (let li = 0; li < totalLayers; li++) {
+    const L = layers[li];
+    const layerOffset = (li % 2) * Math.PI / L.count;   // 相邻层错开，形成层叠
+    for (let k = 0; k < L.count; k++) {
+      const phi = k * (Math.PI * 2 / L.count) + layerOffset;
+      const theta = (L.tilt + Math.sin(k * 2.1) * 0.05) * tiltScale;
+      const growth = new THREE.Vector3(Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi));
+      const radial = new THREE.Vector3(Math.cos(phi), 0, Math.sin(phi));
+      const convex = radial.clone().multiplyScalar(Math.cos(theta)).addScaledVector(UP, Math.sin(theta)).normalize();
+      const side   = new THREE.Vector3().crossVectors(growth, convex).normalize();
+      const basis  = new THREE.Matrix4().makeBasis(side, growth, convex);
+      const basePos = radial.clone().multiplyScalar(L.radius).addScaledVector(UP, L.height);
+
+      const addPoint = (u, v, isEdge) => {
+        // 花瓣轮廓：长方形主体 + 两端椭圆圆角（顶端不尖）
+        const baseR = 0.10, tipR = 0.30;
+        let w;
+        if (v <= baseR) {
+          w = L.width * Math.sin(Math.PI / 2 * (v / baseR));
+        } else if (v >= 1 - tipR) {
+          const t = (v - (1 - tipR)) / tipR;
+          w = L.width * Math.cos(t * Math.PI / 2);
+        } else {
+          w = L.width;
+        }
+        const bow = L.curvature * Math.pow(v, 1.5);
+        const local = new THREE.Vector3(u * w, v * L.length, bow - L.edgeCurl * u * u * v);
+        local.applyMatrix4(basis).add(basePos);
+        const isOuter = (li === totalLayers - 1);   // 最外层花瓣更亮
+        const edgeSize = isOuter ? 0.24 + Math.random() * 0.08 : 0.13 + Math.random() * 0.04;
+        const fillSize = isOuter ? 0.14 + Math.random() * 0.04 : 0.07 + Math.random() * 0.02;
+        add(local.x, local.y, local.z, 0, THREE.MathUtils.clamp((local.y - botY) / (topY - botY), 0, 1), isEdge ? edgeSize : fillSize);
+      };
+
+      // 花瓣轮廓线（左右侧边 + 尖端 + 基部）
+      const nEdge = 22;
+      for (let s = 0; s <= nEdge; s++) {
+        const v = s / nEdge;
+        addPoint(-1, v, true);
+        addPoint(+1, v, true);
+      }
+      for (let s = 0; s <= 4; s++) addPoint(-1 + 2 * s / 4, 1, true);
+      for (let s = 0; s <= 4; s++) addPoint(-1 + 2 * s / 4, 0, true);
+      // 内部填充
+      for (let s = 0; s < 50; s++) addPoint(Math.random() * 2 - 1, Math.random(), false);
+    }
+  }
+
+  /* 2. 螺旋花心 */
+  const nSpiral = 140;
+  for (let s = 0; s < nSpiral; s++) {
+    const t = s / (nSpiral - 1);
+    const th = t * Math.PI * 5;
+    const r = 0.02 + t * 0.14;
+    const y = 0.88 - t * 0.12;
+    add(r * Math.cos(th), y, r * Math.sin(th), 1, t, 0.09);
+  }
+
+  /* 3. 花萼（花托上方向外翻的绿色短弧） */
+  for (let k = 0; k < 5; k++) {
+    const th = (k / 5) * Math.PI * 2 + 0.3;
+    for (let s = 0; s <= 5; s++) {
+      const t = s / 5;
+      const r = 0.10 + t * 0.30;
+      add(r * Math.cos(th), -0.05 - t * 0.15, r * Math.sin(th), 3, 0, 0.08);
+    }
+  }
+
+  /* 4. 花托（花头下方绿色膨大，上宽下窄的倒锥） */
+  for (let j = 0; j < 5; j++) {
+    const t = j / 4;                       // 0 上 → 1 下
+    const y = -0.05 - t * 0.22;
+    const rr = 0.20 - t * 0.13;            // 上宽 0.20 → 下窄 0.07
+    for (let k = 0; k < 18; k++) {
+      const th = (k / 18) * Math.PI * 2;
+      add(rr * Math.cos(th), y, rr * Math.sin(th), 2, 0, 0.09);
+    }
+  }
+
+  /* 5. 花茎（向下，围成小圆更粗） */
+  /* 6. 绿叶（茎上的叶子：椭圆叶片 + 中脉）
+   * 花束模式（withStem=false）跳过茎叶，只留花头，避免 8 朵的茎叶搅成一团 */
+  if (withStem) {
+    for (let s = 0; s < 55; s++) {
+      const y = -0.27 - s * 0.08;
+      for (let k = 0; k < 6; k++) {
+        const th = (k / 6) * Math.PI * 2;
+        add(0.02 * Math.cos(th), y, 0.02 * Math.sin(th), 2, 0, 0.08);
+      }
+    }
+
+    const leaves = [
+      { y: -1.2, angle: 0.6, len: 0.55, wid: 0.20 },
+      { y: -2.0, angle: 2.4, len: 0.62, wid: 0.22 },
+      { y: -2.8, angle: 4.3, len: 0.58, wid: 0.21 },
+    ];
+    for (const leaf of leaves) {
+      const ca = Math.cos(leaf.angle), sa = Math.sin(leaf.angle);
+      // 叶片（椭圆，沿径向水平伸展，叶宽在垂直方向，微向上翘）
+      for (let s = 0; s < 70; s++) {
+        const u = Math.random() * 2 - 1;
+        const v = Math.random();
+        const lx = u * leaf.wid * Math.sin(Math.PI * v);   // 叶宽（垂直方向）
+        const ly = v * leaf.len;                           // 叶长（径向）
+        add(ca * ly, leaf.y + lx + 0.06 * Math.sin(Math.PI * v), sa * ly, 2, 0, 0.08);
+      }
+      // 中脉（叶脉）
+      for (let s = 0; s <= 12; s++) {
+        const v = s / 12;
+        add(ca * v * leaf.len, leaf.y + 0.06 * Math.sin(Math.PI * v), sa * v * leaf.len, 3, 0, 0.08);
+      }
+    }
+  }
+
+  /* 统一生成 startPos / delay */
+  const N = raw.length;
+  const startPos = [], targetPos = [], colors = [], delays = [], sizes = [];
+  raw.forEach((p, i) => {
+    targetPos.push(p.x, p.y, p.z);
+    const r = 2.0 + Math.random() * 1.6;
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    startPos.push(
+      p.x + r * Math.sin(ph) * Math.cos(th),
+      p.y + r * Math.sin(ph) * Math.sin(th),
+      p.z + r * Math.cos(ph)
+    );
+    colors.push(p.type, p.t, 0);   // r=类型, g=参数(高度/花心进度), b 保留
+    delays.push(roseOffset + (i / N) * 0.5 + Math.random() * 0.05);
+    sizes.push(p.size);
+  });
+
+  return { startPos, targetPos, colors, delays, sizes };
+}
+
+/* ===================== 花束组装 ===================== */
+const roseMaterial = new THREE.ShaderMaterial({
+  uniforms: {
+    uProgress: { value: 0 },
+    uTime: { value: 0 },
+    uTopColor: { value: new THREE.Color(0xf0a3ff) },
+    uBottomColor: { value: new THREE.Color(0xfde6ff) },
+    uHeartColor: { value: new THREE.Color(0xc862ff) },
+    uGreenColor: { value: new THREE.Color(0xe0a6ff) },
+    uGreenDkColor: { value: new THREE.Color(0xc862ff) },
+    uRainbow: { value: 0 },
+  },
+  vertexShader: roseVertexShader,
+  fragmentShader: roseFragmentShader,
+  transparent: true,
+  depthWrite: false,
+  depthTest: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const bouquet = new THREE.Group();
+const UP = new THREE.Vector3(0, 1, 0);
+const flowerCenters = [];   // 每朵花的中心世界坐标（供光尘粒子锚定）
+
+if (isSingle) {
+  // 单朵查看：俯视微侧
+  const d = generateRoseParticles(0);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(d.startPos, 3));
+  geo.setAttribute('targetPos', new THREE.Float32BufferAttribute(d.targetPos, 3));
+  geo.setAttribute('col', new THREE.Float32BufferAttribute(d.colors, 3));
+  geo.setAttribute('delay', new THREE.Float32BufferAttribute(d.delays, 1));
+  geo.setAttribute('size', new THREE.Float32BufferAttribute(d.sizes, 1));
+  const points = new THREE.Points(geo, roseMaterial);
+  points.scale.setScalar(0.85);
+  points.position.set(0, 1.6, 0);
+  points.quaternion.setFromUnitVectors(UP, new THREE.Vector3(0, 1, 0));
+  points.frustumCulled = false;
+  bouquet.add(points);
+  flowerCenters.push(new THREE.Vector3(0, 1.6, 0));
+} else {
+  // 8 朵手捧花：保留长茎大叶，中心 1 朵大（4 层）+ 周围 7 朵小（3 层）
+  const layout = [
+    { pos: [0, 0.5, 0.15], scale: 0.85, axis: [0, 1, 0.05], layers: 4, tiltScale: 0.3 },   // 中心，完整大花，花瓣更收拢
+  ];
+  const R = 1.35;       // 周围花的水平半径
+  const ringY = 0.45;   // 周围花头抬高，仅比中心花低 0.05
+  for (let i = 0; i < 7; i++) {
+    const a = i * Math.PI * 2 / 7;
+    layout.push({
+      pos: [Math.cos(a) * R, ringY, Math.sin(a) * R],
+      scale: 0.78,
+      axis: [Math.cos(a), 1, Math.sin(a)],   // 花头朝外上方，茎朝内下收拢
+      layers: 3,                             // 少一层，花变小
+    });
+  }
+  for (const cfg of layout) {
+    const d = generateRoseParticles(0, true, cfg.layers, cfg.tiltScale);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(d.startPos, 3));
+    geo.setAttribute('targetPos', new THREE.Float32BufferAttribute(d.targetPos, 3));
+    geo.setAttribute('col', new THREE.Float32BufferAttribute(d.colors, 3));
+    geo.setAttribute('delay', new THREE.Float32BufferAttribute(d.delays, 1));
+    geo.setAttribute('size', new THREE.Float32BufferAttribute(d.sizes, 1));
+    const points = new THREE.Points(geo, roseMaterial);
+    points.scale.setScalar(cfg.scale);
+    points.position.set(cfg.pos[0], cfg.pos[1], cfg.pos[2]);
+    points.quaternion.setFromUnitVectors(UP, new THREE.Vector3(cfg.axis[0], cfg.axis[1], cfg.axis[2]).normalize());
+    points.frustumCulled = false;
+    bouquet.add(points);
+    flowerCenters.push(new THREE.Vector3(cfg.pos[0], cfg.pos[1], cfg.pos[2]));
+  }
+}
+scene.add(bouquet);
+
+/* ===================== 背景星光 ===================== */
+function createStars() {
+  const count = 1800;
+  const pos = new Float32Array(count * 3);
+  const sizes = new Float32Array(count);
+  const tw = new Float32Array(count);
+  const colors = new Float32Array(count * 3);
+  const palette = [
+    [1.0, 1.0, 1.0],        // 白
+    [0.72, 0.80, 1.0],      // 淡蓝
+    [0.90, 0.75, 1.0],      // 淡紫
+    [0.75, 0.65, 1.0],      // 蓝紫
+  ];
+  for (let i = 0; i < count; i++) {
+    const r = 7 + Math.random() * 7;    // 全向球壳，环绕相机
+    const th = Math.random() * Math.PI * 2;
+    const ph = Math.acos(2 * Math.random() - 1);
+    pos[i*3]   = r * Math.sin(ph) * Math.cos(th);
+    pos[i*3+1] = r * Math.sin(ph) * Math.sin(th);
+    pos[i*3+2] = r * Math.cos(ph);
+    // 大小分层：大部分小星，少量亮星（pow 让分布偏向小值）
+    sizes[i] = 0.006 + Math.pow(Math.random(), 3) * 0.07;
+    tw[i] = 0.5 + Math.random() * 2.0;
+    const col = palette[Math.floor(Math.random() * palette.length)];
+    colors[i*3]   = col[0];
+    colors[i*3+1] = col[1];
+    colors[i*3+2] = col[2];
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+  geo.setAttribute('tw', new THREE.BufferAttribute(tw, 1));
+  geo.setAttribute('col', new THREE.BufferAttribute(colors, 3));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 } },
+    vertexShader: starVertexShader,
+    fragmentShader: starFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const stars = new THREE.Points(geo, mat);
+  stars.frustumCulled = false;
+  return stars;
+}
+const stars = createStars();
+scene.add(stars);
+
+/* ===================== 漂浮光尘粒子 ===================== */
+const dustVertexShader = `
+  attribute vec3 anchor;    // 所属花的中心世界坐标（粒子从这里溢出）
+  attribute float phase;    // 该粒子的随机相位
+  attribute float speed;    // 溢出快慢
+  attribute float drift;    // 游走幅度
+  attribute float size;     // 圆点大小（和花瓣粒子一致）
+  uniform float uTime;
+  varying float vT;
+  void main(){
+    float t = mod(uTime * speed + phase, 1.0);     // 溢出进度 0→1 循环
+    float ang = phase * 6.2831;                    // 该粒子固定的溢出方向
+    float r = t * 2.6;                             // 扩散半径 0→2.6
+    vec3 p = anchor;
+    p.x += cos(ang + uTime * 0.25) * r;            // 从花心向外螺旋扩散
+    p.z += sin(ang + uTime * 0.25) * r;
+    p.y += t * 3.2;                                // 同时向上飘
+    p.x += sin(uTime * 0.9 + phase * 6.2831) * drift;   // 加一点随机游走
+    p.z += cos(uTime * 0.8 + phase * 4.1888) * drift;
+    vT = t;
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = size * (340.0 / -mvPosition.z);   // 和花瓣粒子同样的尺寸系数
+  }
+`;
+const dustFragmentShader = `
+  uniform vec3 uColor;
+  varying float vT;
+  void main(){
+    vec2 c = gl_PointCoord - vec2(0.5);
+    float d = length(c);
+    float a = smoothstep(0.5, 0.08, d);   // 柔边圆点，和花瓣粒子一致
+    a *= smoothstep(0.0, 0.15, vT) * smoothstep(1.0, 0.75, vT);   // 从花心淡入、溢出后淡出
+    gl_FragColor = vec4(uColor, a * 0.9);   // 跟随花瓣顶端色
+  }
+`;
+
+function createDust(centers) {
+  const count = 1000;   // 溢出粒子总数（8 朵均分，每朵约 125 个）
+  const pos = new Float32Array(count * 3);
+  const anchor = new Float32Array(count * 3);
+  const phase = new Float32Array(count);
+  const speed = new Float32Array(count);
+  const drift = new Float32Array(count);
+  const size = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const c = centers[Math.floor(Math.random() * centers.length)];   // 每个粒子随机锚定一朵花
+    anchor[i*3]   = c.x;
+    anchor[i*3+1] = c.y;
+    anchor[i*3+2] = c.z;
+    pos[i*3] = pos[i*3+1] = pos[i*3+2] = 0;   // position 不用，用 anchor
+    phase[i] = Math.random();
+    speed[i] = 0.10 + Math.random() * 0.15;
+    drift[i] = 0.2 + Math.random() * 0.6;
+    size[i] = 0.09 + Math.random() * 0.08;   // 溢出粒子 0.09~0.17
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('anchor', new THREE.BufferAttribute(anchor, 3));
+  geo.setAttribute('phase', new THREE.BufferAttribute(phase, 1));
+  geo.setAttribute('speed', new THREE.BufferAttribute(speed, 1));
+  geo.setAttribute('drift', new THREE.BufferAttribute(drift, 1));
+  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uColor: { value: new THREE.Color(0xf0a3ff) } },
+    vertexShader: dustVertexShader,
+    fragmentShader: dustFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const dust = new THREE.Points(geo, mat);
+  dust.frustumCulled = false;
+  return dust;
+}
+const dust = createDust(flowerCenters);
+scene.add(dust);
+
+/* ===================== 花色切换（30 秒一个色系） ===================== */
+const colorSchemes = [
+  { name: '红色系',   top: 0xd32f3f, bottom: 0xf6c6c6, heart: 0xa31224, green: 0xd98a96, greenDk: 0xa31224 },
+  { name: '粉色系',   top: 0xff9ec4, bottom: 0xffe0ea, heart: 0xf26b9c, green: 0xffb8d0, greenDk: 0xf26b9c },
+  { name: '白色系',   top: 0xf2eded, bottom: 0xffffff, heart: 0xd0c8c8, green: 0xddd5d5, greenDk: 0xb0a8a8 },
+  { name: '黄色系',   top: 0xffd23e, bottom: 0xfff3b0, heart: 0xe0a800, green: 0xffdf80, greenDk: 0xd9a400 },
+  { name: '橙色系',   top: 0xff9a5c, bottom: 0xffd9b0, heart: 0xe0702a, green: 0xffb580, greenDk: 0xe0702a },
+  { name: '紫色系',   top: 0xa86bff, bottom: 0xe3ccff, heart: 0x6a2fb0, green: 0xd998ff, greenDk: 0x6a2fb0 },
+  { name: '绿色系',   top: 0x5fc96a, bottom: 0xc8f0c8, heart: 0x2e8b4d, green: 0x8fd88f, greenDk: 0x2e8b4d },
+  { name: '蓝色系',   top: 0x4a7dff, bottom: 0xb8ccff, heart: 0x2446c8, green: 0x94b8ff, greenDk: 0x2446c8 },
+  { name: '金色系',   top: 0xd4a017, bottom: 0xffecb0, heart: 0x9a7b00, green: 0xe8cf80, greenDk: 0x9a7b00 },
+  { name: '香槟系',   top: 0xe8cfa0, bottom: 0xf8ecd0, heart: 0xc9a86a, green: 0xdcc89a, greenDk: 0xc9a86a },
+  { name: '酒红系',   top: 0x8a1530, bottom: 0xc86a7a, heart: 0x520a18, green: 0xa05060, greenDk: 0x520a18 },
+  { name: '玫红系',   top: 0xe0288a, bottom: 0xffb0d8, heart: 0xa01258, green: 0xff8ac0, greenDk: 0xa01258 },
+  { name: '薰衣草系', top: 0xb388e8, bottom: 0xe8dcff, heart: 0x8a5cc0, green: 0xc8a8f0, greenDk: 0x8a5cc0 },
+  { name: '珊瑚系',   top: 0xff6f61, bottom: 0xffc4b0, heart: 0xe0503a, green: 0xffa090, greenDk: 0xe0503a },
+  { name: '咖啡系',   top: 0xa0683a, bottom: 0xd8b894, heart: 0x6a4020, green: 0xb88860, greenDk: 0x6a4020 },
+  { name: '奶油系',   top: 0xf0e0b8, bottom: 0xfffaf0, heart: 0xd0b890, green: 0xe8d8b0, greenDk: 0xd0b890 },
+  { name: '桃粉系',   top: 0xffab91, bottom: 0xffe0d0, heart: 0xef7a5a, green: 0xffc4a0, greenDk: 0xef7a5a },
+  { name: '黑巴克系', top: 0x4a1020, bottom: 0x7a3040, heart: 0x200608, green: 0x5a2030, greenDk: 0x200608 },
+  { name: '青蓝系',   top: 0x00d4ff, bottom: 0xb8f4ff, heart: 0x0090b0, green: 0x80e8f0, greenDk: 0x0090b0 },
+  { name: '彩虹渐变', rainbow: true, heart: 0xa050c0, green: 0x8fd88f, greenDk: 0x2e8b4d },
+];
+let schemeIndex = 0;
+// 目标色：切换时更新这里，animate 里逐帧 lerp 平滑过渡
+const targetColors = {
+  top: new THREE.Color(0xd32f3f),
+  bottom: new THREE.Color(0xf6c6c6),
+  heart: new THREE.Color(0xa31224),
+  green: new THREE.Color(0xd98a96),
+  greenDk: new THREE.Color(0xa31224),
+  dust: new THREE.Color(0xd32f3f),
+  rainbow: 0,
+};
+function applyScheme(idx) {
+  const s = colorSchemes[idx];
+  if (s.rainbow) {
+    targetColors.rainbow = 1.0;   // 进入彩虹模式
+    targetColors.heart.setHex(s.heart);
+    targetColors.green.setHex(s.green);
+    targetColors.greenDk.setHex(s.greenDk);
+    targetColors.dust.setHex(0xfff0ff);   // 彩虹模式溢出粒子用近白粉
+  } else {
+    targetColors.rainbow = 0.0;
+    targetColors.top.setHex(s.top);
+    targetColors.bottom.setHex(s.bottom);
+    targetColors.heart.setHex(s.heart);
+    targetColors.green.setHex(s.green);
+    targetColors.greenDk.setHex(s.greenDk);
+    targetColors.dust.setHex(s.top);   // 溢出粒子跟随花瓣顶端色
+  }
+}
+applyScheme(0);   // 初始红色系
+// 初始直接设为目标色（不渐变），之后切换才平滑过渡
+roseMaterial.uniforms.uTopColor.value.copy(targetColors.top);
+roseMaterial.uniforms.uBottomColor.value.copy(targetColors.bottom);
+roseMaterial.uniforms.uHeartColor.value.copy(targetColors.heart);
+roseMaterial.uniforms.uGreenColor.value.copy(targetColors.green);
+roseMaterial.uniforms.uGreenDkColor.value.copy(targetColors.greenDk);
+dust.material.uniforms.uColor.value.copy(targetColors.dust);
+setInterval(() => {
+  schemeIndex = (schemeIndex + 1) % colorSchemes.length;
+  applyScheme(schemeIndex);
+}, 30000);
+
+/* ===================== 银河圈（花茎汇聚处） ===================== */
+const galaxyVertexShader = `
+  attribute float phase;   // 初始角度
+  attribute float radius;  // 半径
+  attribute float size;
+  uniform float uTime;
+  uniform float uProgress;   // 出现进度 0→1（从中心扩散展开）
+  varying float vR;
+  varying float vFade;
+  void main(){
+    vFade = 0.0;                                   // 竖直圈无甩出
+    float r = radius * uProgress;                  // 从中心扩散到目标半径
+    float ang = phase + uTime * 0.12;              // 整体缓慢自转
+    vec3 p = vec3(cos(ang) * r, sin(ang) * r, position.z);
+    p.z += sin(uTime * 1.2 + phase * 6.0) * 0.04;  // 轻微前后浮动
+    vR = (radius - 0.075) / 1.375;                 // 归一化半径 0~1
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = size * (340.0 / -mvPosition.z);
+  }
+`;
+const galaxyFragmentShader = `
+  uniform float uBrightness;
+  uniform float uProgress;
+  varying float vR;
+  varying float vFade;
+  void main(){
+    vec2 c = gl_PointCoord - vec2(0.5);
+    float d = length(c);
+    float a = smoothstep(0.5, 0.08, d);
+    a *= smoothstep(0.0, 0.3, uProgress);   // 出现时淡入
+    a *= 1.0 - vFade * 0.85;                // 甩出的粒子飘散淡出
+    vec3 inner = vec3(0.90, 0.50, 1.0);   // 内圈亮品红紫（呼应花）
+    vec3 outer = vec3(0.55, 0.60, 1.0);  // 外圈亮蓝紫（呼应星空）
+    vec3 col = mix(inner, outer, vR) * uBrightness;
+    gl_FragColor = vec4(col, a * 1.0);
+  }
+`;
+
+function createGalaxy() {
+  const count = 1200;
+  const pos = new Float32Array(count * 3);
+  const phase = new Float32Array(count);
+  const radius = new Float32Array(count);
+  const size = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const t = Math.random();
+    const r = 0.075 + t * 1.375;                           // 半径 0.075~1.45（整体减半）
+    const arm = Math.floor(Math.random() * 2) * Math.PI;   // 2 条螺旋臂
+    const a = t * 2.0 * Math.PI + arm + Math.random() * 0.35;   // 螺旋角度（随半径增加）
+    pos[i*3]   = Math.cos(a) * r;                          // 在 XY 平面成环（面向相机）
+    pos[i*3+1] = Math.sin(a) * r;
+    pos[i*3+2] = (Math.random() * 2 - 1) * 0.3;            // z 散布（环带宽度 5 倍）
+    phase[i] = a;
+    radius[i] = r;
+    size[i] = 0.09 + Math.random() * 0.09;   // 0.09~0.18，比花茎更大更亮
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('phase', new THREE.BufferAttribute(phase, 1));
+  geo.setAttribute('radius', new THREE.BufferAttribute(radius, 1));
+  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uBrightness: { value: 0.7 }, uProgress: { value: 0 } },   // 竖直圈调暗
+    vertexShader: galaxyVertexShader,
+    fragmentShader: galaxyFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const galaxy = new THREE.Points(geo, mat);
+  galaxy.frustumCulled = false;
+  galaxy.renderOrder = 1;           // 渲染在玫瑰之后，环不被花茎盖住
+  galaxy.position.set(0, -0.9, 0);   // 放在茎汇聚处
+  return galaxy;
+}
+const galaxy = createGalaxy();
+scene.add(galaxy);
+
+/* ===================== 水平银河环（环绕花茎，半径 2 倍） ===================== */
+const haloVertexShader = `
+  attribute float phase;
+  attribute float radius;
+  attribute float size;
+  uniform float uTime;
+  uniform float uProgress;   // 出现进度 0→1（从中心扩散展开）
+  uniform float uFling;      // 拖动甩出强度 0~1
+  uniform float uFlingTime;  // 甩出循环累积时间
+  varying float vR;
+  varying float vFade;       // 甩出粒子的淡出（传给片元）
+  void main(){
+    float r = radius * uProgress;                  // 从中心扩散到目标半径
+    float ang = phase + uTime * 0.10;              // 绕花茎(Y轴)旋转
+    vec3 p = vec3(cos(ang) * r, position.y, sin(ang) * r);   // XZ 水平环
+    // 甩出循环：粒子周期性甩出→飘散→消失→回环（保持环完整，持续有新粒子甩出）
+    float fp = fract(uFlingTime * 0.35 + phase);   // 0~1 循环
+    float flingCurve = smoothstep(0.0, 0.2, fp) * smoothstep(1.0, 0.75, fp);
+    float isFling = step(0.65, fract(phase * 17.3));   // 约 35% 粒子参与甩出
+    float fling = uFling * isFling * flingCurve;
+    float dist = fling * 3.0 * fract(phase * 7.31);
+    p.x += (cos(ang + 1.5708) + cos(ang) * 0.6) * dist;
+    p.z += (sin(ang + 1.5708) + sin(ang) * 0.6) * dist;
+    p.y += fling * 0.4;
+    p.y += sin(uTime * 1.0 + phase * 5.0) * 0.04;  // 轻微上下浮动
+    vFade = fling;
+    vR = (radius - 0.6) / 11.0;                    // 归一化半径 0~1
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * mvPosition;
+    gl_PointSize = size * (340.0 / -mvPosition.z);
+  }
+`;
+
+function createHalo() {
+  const count = 1600;
+  const pos = new Float32Array(count * 3);
+  const phase = new Float32Array(count);
+  const radius = new Float32Array(count);
+  const size = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    const t = Math.random();
+    const r = 0.60 + t * 11.0;                             // 半径 0.6~11.6（span 5 倍）
+    const arm = Math.floor(Math.random() * 2) * Math.PI;
+    const a = t * 2.0 * Math.PI + arm + Math.random() * 0.35;
+    pos[i*3]   = Math.cos(a) * r;                          // XZ 平面（水平）
+    pos[i*3+1] = (Math.random() * 2 - 1) * 0.3;            // y 散布（环带宽度 5 倍）
+    pos[i*3+2] = Math.sin(a) * r;
+    phase[i] = a;
+    radius[i] = r;
+    size[i] = 0.09 + Math.random() * 0.09;   // 0.09~0.18，比花茎更大更亮
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('phase', new THREE.BufferAttribute(phase, 1));
+  geo.setAttribute('radius', new THREE.BufferAttribute(radius, 1));
+  geo.setAttribute('size', new THREE.BufferAttribute(size, 1));
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uBrightness: { value: 1.0 }, uProgress: { value: 0 }, uFling: { value: 0 }, uFlingTime: { value: 0 } },   // 水平环保持亮
+    vertexShader: haloVertexShader,
+    fragmentShader: galaxyFragmentShader,   // 复用银河圈的渐变配色
+    transparent: true,
+    depthWrite: false,
+    depthTest: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const halo = new THREE.Points(geo, mat);
+  halo.frustumCulled = false;
+  halo.renderOrder = 2;           // 渲染在玫瑰之后，环不被花茎盖住
+  halo.position.set(0, -0.9, 0);   // 和竖直银河圈同高度，环绕花茎
+  halo.rotation.x = 0.41;          // 绕 X 轴倾斜约 23.5°（比原来降低 5°）
+  return halo;
+}
+const halo = createHalo();
+scene.add(halo);
+
+/* ===================== 交互控制器 ===================== */
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, isSingle ? 0 : 0.2, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 2.5;
+controls.maxDistance = 11;
+controls.maxPolarAngle = Math.PI * 0.95;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.5;
+let isDragging = false;
+controls.addEventListener('start', () => { isDragging = true; });   // 开始拖动
+controls.addEventListener('end', () => { isDragging = false; });     // 结束拖动
+
+/* ===================== 窗口尺寸自适应 ===================== */
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+/* ===================== 渲染循环 ===================== */
+const DURATION = 3.8;
+const isInstant = new URLSearchParams(location.search).has('instant');
+const startTime = performance.now();
+function animate() {
+  requestAnimationFrame(animate);
+  const elapsed = (performance.now() - startTime) / 1000;
+  roseMaterial.uniforms.uProgress.value = isInstant ? 1.0 : Math.min(elapsed / DURATION, 1.0);
+  roseMaterial.uniforms.uTime.value = elapsed;
+  stars.material.uniforms.uTime.value = elapsed;
+  dust.material.uniforms.uTime.value = elapsed;
+  galaxy.material.uniforms.uTime.value = elapsed;
+  halo.material.uniforms.uTime.value = elapsed;
+
+  // 银河圈出现动画：约 2.5 秒从中心扩散展开 + 淡入
+  const ringP = isInstant ? 1.0 : Math.min(elapsed / 2.5, 1.0);
+  galaxy.material.uniforms.uProgress.value = ringP;
+  halo.material.uniforms.uProgress.value = ringP;
+
+  // 拖动甩出：拖动时 uFling 升高，松手衰减
+  const targetFling = isDragging ? 1.0 : 0.0;
+  halo.material.uniforms.uFling.value = THREE.MathUtils.lerp(halo.material.uniforms.uFling.value, targetFling, 0.08);
+  halo.material.uniforms.uFlingTime.value += 0.015;   // 甩出循环相位持续累积（飘散不中断）
+
+  // 花色平滑过渡（每帧向目标色插值一小步）
+  const LERP = 0.04;
+  roseMaterial.uniforms.uTopColor.value.lerp(targetColors.top, LERP);
+  roseMaterial.uniforms.uBottomColor.value.lerp(targetColors.bottom, LERP);
+  roseMaterial.uniforms.uHeartColor.value.lerp(targetColors.heart, LERP);
+  roseMaterial.uniforms.uGreenColor.value.lerp(targetColors.green, LERP);
+  roseMaterial.uniforms.uGreenDkColor.value.lerp(targetColors.greenDk, LERP);
+  dust.material.uniforms.uColor.value.lerp(targetColors.dust, LERP);
+  roseMaterial.uniforms.uRainbow.value = THREE.MathUtils.lerp(roseMaterial.uniforms.uRainbow.value, targetColors.rainbow, LERP);
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
