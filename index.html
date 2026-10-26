@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<title>粉色玫瑰</title>
+<title>玫瑰花</title>
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; }
   body {
@@ -518,8 +518,8 @@ scene.add(dust);
 
 /* ===================== 花色切换（30 秒一个色系） ===================== */
 const colorSchemes = [
-  { name: '红色系',   top: 0xd32f3f, bottom: 0xf6c6c6, heart: 0xa31224, green: 0xd98a96, greenDk: 0xa31224 },
   { name: '粉色系',   top: 0xff9ec4, bottom: 0xffe0ea, heart: 0xf26b9c, green: 0xffb8d0, greenDk: 0xf26b9c },
+  { name: '红色系',   top: 0xd32f3f, bottom: 0xf6c6c6, heart: 0xa31224, green: 0xd98a96, greenDk: 0xa31224 },
   { name: '白色系',   top: 0xf2eded, bottom: 0xffffff, heart: 0xd0c8c8, green: 0xddd5d5, greenDk: 0xb0a8a8 },
   { name: '黄色系',   top: 0xffd23e, bottom: 0xfff3b0, heart: 0xe0a800, green: 0xffdf80, greenDk: 0xd9a400 },
   { name: '橙色系',   top: 0xff9a5c, bottom: 0xffd9b0, heart: 0xe0702a, green: 0xffb580, greenDk: 0xe0702a },
@@ -579,7 +579,7 @@ dust.material.uniforms.uColor.value.copy(targetColors.dust);
 setInterval(() => {
   schemeIndex = (schemeIndex + 1) % colorSchemes.length;
   applyScheme(schemeIndex);
-}, 30000);
+}, 10000);  //切换时间 10s
 
 /* ===================== 银河圈（花茎汇聚处） ===================== */
 const galaxyVertexShader = `
@@ -695,7 +695,7 @@ const haloVertexShader = `
 `;
 
 function createHalo() {
-  const count = 1600;
+  const count = 2400;  //水平环粒子数
   const pos = new Float32Array(count * 3);
   const phase = new Float32Array(count);
   const radius = new Float32Array(count);
@@ -706,7 +706,7 @@ function createHalo() {
     const arm = Math.floor(Math.random() * 2) * Math.PI;
     const a = t * 2.0 * Math.PI + arm + Math.random() * 0.35;
     pos[i*3]   = Math.cos(a) * r;                          // XZ 平面（水平）
-    pos[i*3+1] = (Math.random() * 2 - 1) * 0.3;            // y 散布（环带宽度 5 倍）
+    pos[i*3+1] = (Math.random() * 2 - 1) * 0.5;            // y 散布（环带宽度 5 倍）
     pos[i*3+2] = Math.sin(a) * r;
     phase[i] = a;
     radius[i] = r;
